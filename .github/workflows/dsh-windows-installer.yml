@@ -1,0 +1,78 @@
+# 在 GitHub 的 windows-latest runner 上构建 dsh Windows x64 安装包（未签名）。
+#
+# 为什么能绕开 apps/desktop/scripts/package-target.ts:156 的宿主守卫：
+# GitHub 的 windows-latest runner 本身就是 Windows Server x64，
+# 因此 process.platform === 'win32' 且 process.arch === 'x64'。
+# 该镜像还预装了 Visual Studio Build Tools 与 Python，原生模块可直接编译。
+
+name: Build Windows installer
+
+on:
+  # 推到默认分支即自动构建
+  push:
+    branches: [master]
+  # 也可在 Actions 页面手动触发
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: 反向 DNS 应用标识（写入安装包标识）
+        required: true
+        default: com.weigong1983.deepseek-harness
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Windows Server x64：天然满足桌面打包的宿主平台要求
+    runs-on: windows-latest
+    # 首次构建含运行时下载、生产依赖树投影与原生模块编译
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # release:pack 会读取 git tag，浅克隆会失败
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/setup-node@v6
+        with:
+          # 满足仓库 engines: ^22.19.0 || >=24.0.0
+          node-version: 24
+
+      - name: Report build host
+        shell: pwsh
+        run: node -e "console.log('platform=' + process.platform + ' arch=' + process.arch)"
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build win-x64 installer (unsigned)
+        shell: pwsh
+        env:
+          DSH_DESKTOP_APP_ID: ${{ inputs.app_id || 'com.weigong1983.deepseek-harness' }}
+        run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: List artifacts
+        shell: pwsh
+        run: |
+          $out = 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts'
+          if (-not (Test-Path $out)) { throw "产物目录不存在: $out" }
+          Get-ChildItem $out | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-win-x64-installer
+          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
